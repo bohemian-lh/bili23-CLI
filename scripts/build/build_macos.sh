@@ -69,19 +69,6 @@ check_dependency "wget" "brew install wget"
 check_dependency "unzip" "brew install unzip"
 check_dependency "zip" "系统已内置"
 
-# 检查 create-dmg（可选，用于最终 DMG 生成）
-HAS_CREATE_DMG=false
-if command -v create-dmg &> /dev/null; then
-    HAS_CREATE_DMG=true
-else
-    if command -v brew &> /dev/null; then
-        echo "  create-dmg 未安装，将使用 hdiutil 替代（效果相同但无自定义图标布局）"
-        echo "  建议安装: brew install create-dmg"
-    else
-        echo "  注: 将使用 hdiutil 生成 DMG"
-    fi
-fi
-
 # ---------- 创建目录结构 ----------
 echo ""
 echo "[2/8] 创建构建目录..."
@@ -205,9 +192,8 @@ rm -rf "$PIP_INSTALL_DIR"
 mkdir -p "$PIP_INSTALL_DIR"
 
 echo "  安装依赖包..."
-/opt/homebrew/bin/pip3.13 install \
+python3.13 -m pip install \
     --target="$PIP_INSTALL_DIR" \
-    --no-deps \
     --no-cache-dir \
     PySide6==6.10.3 \
     PySide6-Fluent-Widgets==1.11.2 \
@@ -241,8 +227,8 @@ cp -r "$PROJECT_DIR/src/"* "$SCRIPT_DEST/"
 
 # 编译 Python 源码为 .pyc（减小体积、加快启动）
 echo "  编译 Python 源码..."
-/opt/homebrew/bin/python3.13 -m compileall -q -b "$SCRIPT_DEST" 2>/dev/null || true
-/opt/homebrew/bin/python3.13 -m compileall -q -b "$SITE_PACKAGES_DEST" 2>/dev/null || true
+python3.13 -m compileall -q -b "$SCRIPT_DEST" 2>/dev/null || true
+python3.13 -m compileall -q -b "$SITE_PACKAGES_DEST" 2>/dev/null || true
 
 # 可选：删除 .py 源文件以减小体积（保留 .pyc）
 # find "$SCRIPT_DEST" -name "*.py" ! -name "__init__.py" -delete
@@ -415,65 +401,40 @@ rm -f "$DMG_PATH" "$ZIP_PATH"
 # 移动 app 到直接可用的位置
 mv "$BUILD_DIR/app_build" "$BUILD_DIR/$APP_NAME.app"
 
-# 尝试 DMG（可能因沙箱限制失败）
-DMG_SUCCESS=false
-if [ "$HAS_CREATE_DMG" = true ]; then
-    echo "  使用 create-dmg 生成 DMG..."
-    create-dmg \
-        --volname "bili23-AISum Installer" \
-        --window-pos 400 200 \
-        --window-size 660 400 \
-        --icon-size 80 \
-        --icon "${APP_NAME}.app" 160 160 \
-        --hide-extension "${APP_NAME}.app" \
-        --app-drop-link 500 160 \
-        "$DMG_PATH" \
-        "$BUILD_DIR/$APP_NAME.app/" 2>/dev/null && DMG_SUCCESS=true
-fi
+# 创建 DMG（含 Applications 快捷方式，支持拖拽安装）
+DMG_STAGING="$BUILD_DIR/dmg_staging"
+rm -rf "$DMG_STAGING"
+mkdir -p "$DMG_STAGING"
+cp -R "$BUILD_DIR/$APP_NAME.app" "$DMG_STAGING/"
+ln -s /Applications "$DMG_STAGING/Applications"
 
-if [ "$DMG_SUCCESS" = false ]; then
-    # 尝试 hdiutil
-    TEMP_DMG="$BUILD_DIR/temp.dmg"
-    rm -f "$TEMP_DMG"
-    
-    APP_SIZE=$(du -sk "$BUILD_DIR/$APP_NAME.app" | cut -f1)
-    DMG_SIZE=$((APP_SIZE * 15 / 10 + 20480))
-    
-    if hdiutil create -size ${DMG_SIZE}k -volname "bili23-AISum" -fs HFS+ -srcfolder "$BUILD_DIR/$APP_NAME.app" "$TEMP_DMG" 2>/dev/null; then
-        if hdiutil convert "$TEMP_DMG" -format UDZO -o "$DMG_PATH" 2>/dev/null; then
-            DMG_SUCCESS=true
-        fi
-        rm -f "$TEMP_DMG"
-    fi
-fi
+TEMP_DMG="$BUILD_DIR/temp.dmg"
+rm -f "$TEMP_DMG"
 
-# 无论如何都创建 zip（作为备选分发格式）
+APP_SIZE=$(du -sk "$BUILD_DIR/$APP_NAME.app" | cut -f1)
+DMG_SIZE=$((APP_SIZE * 15 / 10 + 20480))
+
+echo "  创建 DMG ($((DMG_SIZE / 1024))MB)..."
+hdiutil create -size ${DMG_SIZE}k -fs HFS+ -volname "bili23-AISum" \
+    -srcfolder "$DMG_STAGING" "$TEMP_DMG" 2>/dev/null
+
+hdiutil convert "$TEMP_DMG" -format UDZO -o "$DMG_PATH" 2>/dev/null
+rm -f "$TEMP_DMG"
+rm -rf "$DMG_STAGING"
+
+# 创建 zip 备选分发格式
 echo "  创建 ZIP 分发包..."
 cd "$BUILD_DIR"
 zip -qr "$ZIP_NAME" "$APP_NAME.app"
 cd "$PROJECT_DIR"
 
-if [ "$DMG_SUCCESS" = true ]; then
-    echo ""
-    echo "========================================"
-    echo "  打包完成!"
-    echo "  DMG 文件: $DMG_PATH"
-    echo "  ZIP 文件: $ZIP_PATH"
-    echo "  依赖清单: $DEP_LOG"
-    echo "  文件大小: $(du -sh "$DMG_PATH" | cut -f1)"
-else
-    echo ""
-    echo "========================================"
-    echo "  打包完成!"
-    echo "  App 捆绑包: $BUILD_DIR/$APP_NAME.app"
-    echo "  ZIP 文件: $ZIP_PATH"
-    echo "  依赖清单: $DEP_LOG"
-    echo "  文件大小: $(du -sh "$ZIP_PATH" | cut -f1)"
-    echo ""
-    echo "  DMG 创建失败（可能因环境限制），可通过以下命令手动创建："
-    echo "    hdiutil create -srcfolder \"$BUILD_DIR/$APP_NAME.app\" \"$DMG_PATH\""
-fi
+echo ""
 echo "========================================"
+echo "  打包完成!"
+echo "  DMG 文件: $DMG_PATH  ($(du -sh "$DMG_PATH" | cut -f1))"
+echo "  ZIP 文件: $ZIP_PATH  ($(du -sh "$ZIP_PATH" | cut -f1))"
+echo "  依赖清单: $DEP_LOG"
+echo ""
 
 # ---------- 签名提示 ----------
 echo ""
